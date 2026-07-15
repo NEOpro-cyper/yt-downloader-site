@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
     console.error('[YouTube Info Error]', error);
     const message = error instanceof Error ? error.message : 'Failed to get video info';
 
-    if (message.includes('private') || message.includes('unavailable') || message.includes('blocked')) {
+    if (message.includes('private') || message.includes('unavailable') || message.includes('blocked') || message.includes('risk')) {
       return NextResponse.json(
         { success: false, error: 'This video is private, unavailable, or restricted. Only public YouTube videos can be downloaded.' },
         { status: 400 }
