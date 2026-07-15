@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { proxyFetch } from '@/lib/proxy';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
@@ -8,7 +7,8 @@ export const dynamic = 'force-dynamic';
  * YouTube Video Stream Proxy Route
  *
  * GET /api/youtube/stream?url=ENCODED_URL
- * Proxies video with CORS headers and Range support for video preview
+ * Proxies video with CORS headers and Range support for video preview.
+ * Uses direct fetch (the CDN URLs from Express API are publicly accessible).
  */
 export async function GET(request: NextRequest) {
   const streamUrl = request.nextUrl.searchParams.get('url');
@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
       headers['Range'] = rangeHeader;
     }
 
-    const videoResponse = await proxyFetch(streamUrl, {
+    const videoResponse = await fetch(streamUrl, {
       headers,
       redirect: 'follow',
     });
