@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import { Download, Loader2, X, Eye, Pause, Film, Zap, Headphones, MonitorSmartphone, ChevronDown, ChevronUp, Music } from 'lucide-react';
+import { useState, useCallback, useEffect } from 'react';
+import { Download, Loader2, X, Eye, Pause, Film, Zap, Headphones, MonitorSmartphone, ChevronDown, ChevronUp, Music, AlertCircle, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { YouTubeVideoInfo, YouTubeFormat } from '@/lib/youtube/types';
 
@@ -46,6 +46,7 @@ function isAudioFormat(f: YouTubeFormat): boolean {
 export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
   const [resolvingUrls, setResolvingUrls] = useState<Set<string>>(new Set());
   const [resolvedUrls, setResolvedUrls] = useState<Map<string, string>>(new Map());
+  const [resolveErrors, setResolveErrors] = useState<Map<string, string>>(new Map());
   const [downloadingUrl, setDownloadingUrl] = useState<string | null>(null);
   const [showAllQualities, setShowAllQualities] = useState(false);
 
@@ -64,6 +65,7 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
 
     const rc = format.resourceContent;
     setResolvingUrls(prev => new Set(prev).add(rc));
+    setResolveErrors(prev => { const m = new Map(prev); m.delete(rc); return m; });
 
     try {
       const response = await fetch('/api/youtube/resolve', {
@@ -77,9 +79,13 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
         setResolvedUrls(prev => new Map(prev).set(rc, data.data.downloadUrl));
         return data.data.downloadUrl;
       }
-      throw new Error(data.error || 'Failed to resolve');
-    } catch (err) {
-      console.error('[YouTube Resolve] Failed:', err);
+      const errMsg = data.error || 'Failed to resolve';
+      setResolveErrors(prev => new Map(prev).set(rc, errMsg));
+      throw new Error(errMsg);
+    } catch (err: any) {
+      const errMsg = err.message || 'Resolve failed';
+      setResolveErrors(prev => new Map(prev).set(rc, errMsg));
+      console.error('[YouTube Resolve] Failed:', errMsg);
       throw err;
     } finally {
       setResolvingUrls(prev => {
@@ -89,6 +95,30 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
       });
     }
   }, [resolvedUrls]);
+
+  /** Auto-resolve non-direct formats on mount (one at a time, top qualities first) */
+  useEffect(() => {
+    const nonDirectFormats = [...videoFormats, ...audioFormats].filter(
+      f => !f.isDirect && f.resourceContent && !resolvedUrls.has(f.resourceContent) && !resolvingUrls.has(f.resourceContent)
+    );
+    if (nonDirectFormats.length === 0) return;
+
+    // Resolve top 3 non-direct formats automatically
+    const toResolve = nonDirectFormats.slice(0, 3);
+    let cancelled = false;
+
+    (async () => {
+      for (const format of toResolve) {
+        if (cancelled) break;
+        try {
+          await resolveUrl(format);
+        } catch {}
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [video.id]);
 
   /** Handle download click — resolve URL if needed, then download */
   const handleDownload = useCallback(async (format: YouTubeFormat) => {
@@ -155,6 +185,12 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
     return !format.downloadUrl && !!format.resourceContent && resolvingUrls.has(format.resourceContent);
   }, [resolvingUrls]);
 
+  /** Get error for a format */
+  const getError = useCallback((format: YouTubeFormat): string | null => {
+    if (!format.resourceContent) return null;
+    return resolveErrors.get(format.resourceContent) || null;
+  }, [resolveErrors]);
+
   return (
     <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-lg">
       <div className="flex flex-col md:flex-row">
@@ -207,13 +243,16 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
                 {visibleVideoFormats.map((f, idx) => {
                   const effectiveUrl = getEffectiveUrl(f);
                   const resolving = isResolving(f);
+                  const error = getError(f);
                   const isDownloading = downloadingUrl === effectiveUrl;
                   const isLoading = resolving || isDownloading;
 
                   return (
                     <div
                       key={`v-${idx}-${f.quality}`}
-                      className="flex items-center gap-3 p-3 rounded-xl border border-border hover:border-red-500/30 hover:bg-red-500/5 transition-all group"
+                      className={`flex items-center gap-3 p-3 rounded-xl border transition-all group ${
+                        error ? 'border-red-500/30 bg-red-500/5' : 'border-border hover:border-red-500/30 hover:bg-red-500/5'
+                      }`}
                     >
                       {/* Quality badge */}
                       <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-bold border ${getQualityBadgeColor(f.quality)}`}>
@@ -230,7 +269,7 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
                               DIRECT
                             </span>
                           )}
-                          {idx === 0 && !f.isDirect && (
+                          {idx === 0 && !f.isDirect && !error && (
                             <span className="text-xs bg-red-600/20 text-red-400 px-1.5 py-0.5 rounded font-medium">
                               BEST
                             </span>
@@ -238,8 +277,20 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
                         </div>
                         <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
                           {f.sizeMB ? <span>{f.sizeMB} MB</span> : null}
-                          {!f.isDirect && !effectiveUrl && (
-                            <span className="text-yellow-500">Needs resolve</span>
+                          {resolving && (
+                            <span className="text-blue-400 flex items-center gap-1">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Resolving...
+                            </span>
+                          )}
+                          {!f.isDirect && !effectiveUrl && !resolving && !error && (
+                            <span className="text-yellow-500">Waiting to resolve...</span>
+                          )}
+                          {error && (
+                            <span className="text-red-400 flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3" />
+                              {error}
+                            </span>
                           )}
                         </div>
                       </div>
@@ -250,17 +301,21 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
                         disabled={isLoading}
                         size="sm"
                         className={`h-9 rounded-lg gap-1.5 text-sm font-semibold ${
-                          idx === 0
-                            ? 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/20'
-                            : 'bg-red-600/10 hover:bg-red-600/20 text-red-500 border border-red-500/30'
+                          error
+                            ? 'bg-red-600 hover:bg-red-700 text-white'
+                            : idx === 0
+                              ? 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/20'
+                              : 'bg-red-600/10 hover:bg-red-600/20 text-red-500 border border-red-500/30'
                         }`}
                       >
                         {isLoading ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : error ? (
+                          <RefreshCw className="w-4 h-4" />
                         ) : (
                           <Download className="w-4 h-4" />
                         )}
-                        <span>{isLoading ? '...' : 'MP4'}</span>
+                        <span>{isLoading ? '...' : error ? 'Retry' : 'MP4'}</span>
                       </Button>
                     </div>
                   );
@@ -299,13 +354,16 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
                 {audioFormats.map((f, idx) => {
                   const effectiveUrl = getEffectiveUrl(f);
                   const resolving = isResolving(f);
+                  const error = getError(f);
                   const isDownloading = downloadingUrl === effectiveUrl;
                   const isLoading = resolving || isDownloading;
 
                   return (
                     <div
                       key={`a-${idx}-${f.quality}`}
-                      className="flex items-center gap-3 p-3 rounded-xl border border-border hover:border-purple-500/30 hover:bg-purple-500/5 transition-all group"
+                      className={`flex items-center gap-3 p-3 rounded-xl border transition-all group ${
+                        error ? 'border-red-500/30 bg-red-500/5' : 'border-border hover:border-purple-500/30 hover:bg-purple-500/5'
+                      }`}
                     >
                       {/* Audio badge */}
                       <div className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-bold border bg-purple-500/20 text-purple-400 border-purple-500/30">
@@ -325,6 +383,18 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
                         </div>
                         <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
                           {f.sizeMB ? <span>{f.sizeMB} MB</span> : null}
+                          {resolving && (
+                            <span className="text-blue-400 flex items-center gap-1">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Resolving...
+                            </span>
+                          )}
+                          {error && (
+                            <span className="text-red-400 flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3" />
+                              {error}
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -337,10 +407,12 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
                       >
                         {isLoading ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : error ? (
+                          <RefreshCw className="w-4 h-4" />
                         ) : (
                           <Download className="w-4 h-4" />
                         )}
-                        <span>{isLoading ? '...' : 'MP3'}</span>
+                        <span>{isLoading ? '...' : error ? 'Retry' : 'MP3'}</span>
                       </Button>
                     </div>
                   );
