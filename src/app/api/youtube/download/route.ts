@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { proxyFetch } from '@/lib/proxy';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
@@ -7,8 +6,11 @@ export const dynamic = 'force-dynamic';
 /**
  * YouTube Video Download Route
  *
- * GET /api/youtube/download?url=ENCODED_GOOGLEVIDEO_URL&filename=NAME
- * Proxies the video through our server with Content-Disposition: attachment
+ * GET /api/youtube/download?url=ENCODED_URL&filename=NAME
+ * Proxies the video download with Content-Disposition: attachment header.
+ * 
+ * The download URL comes from the Express API /resolve endpoint (googlevideo CDN).
+ * We proxy it to add proper Content-Disposition and avoid CORS issues.
  */
 export async function GET(request: NextRequest) {
   const videoUrl = request.nextUrl.searchParams.get('url');
@@ -36,7 +38,7 @@ export async function GET(request: NextRequest) {
       headers['Range'] = rangeHeader;
     }
 
-    const videoResponse = await proxyFetch(videoUrl, {
+    const videoResponse = await fetch(videoUrl, {
       headers,
       redirect: 'follow',
     });
@@ -64,7 +66,6 @@ export async function GET(request: NextRequest) {
     responseHeaders.set('Access-Control-Allow-Headers', 'Range');
     responseHeaders.set('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges, Content-Disposition');
     responseHeaders.set('Cache-Control', 'no-store');
-    responseHeaders.set('X-Download-Mode', 'force-download');
 
     // Stream the video directly
     if (videoResponse.body) {
