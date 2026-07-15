@@ -14,6 +14,11 @@ import type { YouTubeVideoInfo, YouTubeFormat } from './types';
 // External API URL — handles vidssave.com + proxy
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
+// Cloudflare Worker URL — download proxy (saves VPS bandwidth)
+// For vidssave redirect URLs: Worker follows 302 + streams content
+// For googlevideo URLs: Worker redirects browser directly (no bandwidth)
+export const WORKER_URL = process.env.NEXT_PUBLIC_WORKER_URL || '';
+
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
 const requestCounts = new Map<string, { count: number; resetTime: number }>();
 const RATE_LIMIT_WINDOW = 60 * 1000;
