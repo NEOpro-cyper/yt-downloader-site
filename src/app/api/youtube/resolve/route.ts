@@ -1,37 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveResourceContent } from '@/lib/youtube/client';
+import { resolveQuality, normalizeUrl } from '@/lib/youtube/client';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 /**
- * YouTube Resource Resolve Route
+ * YouTube Quality Resolve Route
  *
  * POST /api/youtube/resolve
- * Body: { resourceContent: "..." }
- * Takes a resourceContent token from /api/youtube/info response and resolves it to a download URL.
- * Now proxies to our Express API /resolve endpoint.
+ * Body: { url: "https://youtube.com/watch?v=...", quality: "1080p" }
+ *
+ * Takes a YouTube URL + quality label, calls the external API's /download
+ * endpoint to resolve it to a direct download URL + audio URL.
  */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { resourceContent } = body;
+    const { url, quality } = body;
 
-    if (!resourceContent || typeof resourceContent !== 'string') {
+    if (!url || typeof url !== 'string') {
       return NextResponse.json(
-        { success: false, error: 'resourceContent token is required' },
+        { success: false, error: 'YouTube video URL is required' },
         { status: 400 }
       );
     }
 
-    const result = await resolveResourceContent(resourceContent);
+    if (!quality || typeof quality !== 'string') {
+      return NextResponse.json(
+        { success: false, error: 'Quality parameter is required (e.g. "1080p", "720p")' },
+        { status: 400 }
+      );
+    }
+
+    const normalizedUrl = normalizeUrl(url);
+    const result = await resolveQuality(normalizedUrl, quality);
 
     return NextResponse.json({
       success: true,
       data: {
         downloadUrl: result.downloadUrl,
-        filesize: result.filesize,
-        sizeMB: result.filesize ? Math.round(result.filesize / 1048576 * 100) / 100 : null,
+        audioUrl: result.audioUrl || null,
+        sizeMB: result.sizeMB || null,
       },
     });
   } catch (error: unknown) {
