@@ -10,6 +10,7 @@ export const dynamic = 'force-dynamic';
  * POST /api/youtube/resolve
  * Body: { resourceContent: "..." }
  * Takes a resourceContent token from /api/youtube/info response and resolves it to a download URL.
+ * Now proxies to our Express API /resolve endpoint.
  */
 export async function POST(request: NextRequest) {
   try {
