@@ -1,9 +1,9 @@
 /**
- * YouTube Download Client — uses Express API for vidssave.com calls
+ * YouTube Download Client — uses external API for vidssave.com calls
  *
  * Flow:
  *   1. GET /parse?url=<YT> → video info + all formats (2-3s)
- *   2. For non-direct formats → GET /resolve?rc=<token> (each one separately)
+ *   2. For non-direct formats → GET /download?url=<YT>&quality=<quality> (each one separately, ~4-7s)
  *
  * Auto-resolves only top 2 highest video qualities that need resolving.
  */
@@ -11,7 +11,7 @@
 import type { YouTubeVideoInfo, YouTubeFormat } from './types';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-// Express API URL — handles vidssave.com + proxy
+// External API URL — handles vidssave.com + proxy
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ function formatSize(bytes: number): number | null {
 
 // ─── API Calls ────────────────────────────────────────────────────────────────
 
-/** Parse: GET /parse?url=<YT_URL> */
+/** Parse: GET /parse?url=<YT_URL> → video info + all formats */
 async function apiParse(ytUrl: string) {
   const url = `${API_BASE}/parse?url=${encodeURIComponent(ytUrl)}`;
   const resp = await fetch(url, {
@@ -99,9 +99,14 @@ async function apiParse(ytUrl: string) {
   return data;
 }
 
-/** Resolve: GET /resolve?rc=<resourceContent> */
-async function apiResolve(resourceContent: string): Promise<{ downloadUrl: string; filesize: number }> {
-  const url = `${API_BASE}/resolve?rc=${encodeURIComponent(resourceContent)}`;
+/** Download (resolve): GET /download?url=<YT_URL>&quality=<quality> → download URL + audio URL */
+async function apiDownload(ytUrl: string, quality: string): Promise<{
+  downloadUrl: string;
+  audioUrl?: string;
+  sizeMB: number;
+  isDirectUrl: boolean;
+}> {
+  const url = `${API_BASE}/download?url=${encodeURIComponent(ytUrl)}&quality=${encodeURIComponent(quality)}`;
   const resp = await fetch(url, {
     method: 'GET',
     headers: { 'Accept': 'application/json' },
@@ -109,13 +114,15 @@ async function apiResolve(resourceContent: string): Promise<{ downloadUrl: strin
 
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-    throw new Error(err.error || `Resolve failed (${resp.status})`);
+    throw new Error(err.error || `Download resolve failed (${resp.status})`);
   }
 
   const data = await resp.json();
   return {
     downloadUrl: data.downloadUrl,
-    filesize: data.filesize || 0,
+    audioUrl: data.audioUrl,
+    sizeMB: data.sizeMB || 0,
+    isDirectUrl: data.isDirectUrl || false,
   };
 }
 
@@ -123,7 +130,7 @@ async function apiResolve(resourceContent: string): Promise<{ downloadUrl: strin
 
 /**
  * Get YouTube video info + all formats.
- * Calls Express API /parse — returns formats with direct URLs + resourceContent tokens.
+ * Calls external API /parse — returns formats with direct URLs + resourceContent tokens.
  */
 export async function getVideoInfo(url: string): Promise<YouTubeVideoInfo> {
   const fullUrl = normalizeUrl(url);
@@ -153,20 +160,68 @@ export async function getVideoInfo(url: string): Promise<YouTubeVideoInfo> {
 }
 
 /**
- * Resolve a single resourceContent token → download URL.
+ * Resolve a single quality → download URL.
+ * Uses external API /download?url=<YT>&quality=<quality>
  * Each call is independent — one API request per quality.
  */
-export async function resolveResourceContent(resourceContent: string): Promise<{ downloadUrl: string; filesize: number }> {
-  return apiResolve(resourceContent);
+export async function resolveQuality(
+  ytUrl: string,
+  quality: string
+): Promise<{ downloadUrl: string; audioUrl?: string; sizeMB: number }> {
+  const result = await apiDownload(ytUrl, quality);
+  return {
+    downloadUrl: result.downloadUrl,
+    audioUrl: result.audioUrl,
+    sizeMB: result.sizeMB,
+  };
+}
+
+// ─── Quality Selection Logic ─────────────────────────────────────────────────
+
+/**
+ * Parse quality string to numeric value for comparison.
+ * e.g. "1080P" → 1080, "720P" → 720, "128KBPS" → 128
+ */
+function qualityToNumber(quality: string): number {
+  const match = quality.match(/(\d+)/);
+  return match ? parseInt(match[1], 10) : 0;
 }
 
 /**
  * Get the top N non-direct video formats to auto-resolve.
- * Strategy: pick top 2 highest qualities that need resolving.
- * E.g. if 1080P + 720P need resolve → resolve both.
- * If 1080P not available → resolve 720P + 480P instead.
+ *
+ * Smart selection strategy:
+ * - Only consider video formats that need resolving (no direct URL)
+ * - If 1080P exists → pick 1080P + 720P (the 2 highest)
+ * - If 1080P not available → pick 720P + 480P (next best pair)
+ * - Falls back to whatever top 2 are available
  */
 export function getTopFormatsToAutoResolve(formats: YouTubeFormat[], count: number = 2): YouTubeFormat[] {
-  const nonDirectVideo = formats.filter(f => f.type === 'video' && !f.isDirect && f.resourceContent);
-  return nonDirectVideo.slice(0, count);
+  // Filter non-direct video formats that need resolving
+  const nonDirectVideo = formats.filter(f => f.type === 'video' && !f.isDirect);
+
+  if (nonDirectVideo.length === 0) return [];
+
+  // Check if 1080P exists among non-direct formats
+  const has1080p = nonDirectVideo.some(f => f.quality.toUpperCase().includes('1080'));
+
+  if (has1080p) {
+    // Prefer: 1080P + 720P (the top 2 highest)
+    const preferred = nonDirectVideo.filter(f => {
+      const q = f.quality.toUpperCase();
+      return q.includes('1080') || q.includes('720');
+    });
+    if (preferred.length >= count) return preferred.slice(0, count);
+    // If not enough preferred, fill with next best
+    return [...preferred, ...nonDirectVideo.filter(f => !preferred.includes(f))].slice(0, count);
+  } else {
+    // No 1080P → pick 720P + 480P
+    const preferred = nonDirectVideo.filter(f => {
+      const q = f.quality.toUpperCase();
+      return q.includes('720') || q.includes('480');
+    });
+    if (preferred.length >= count) return preferred.slice(0, count);
+    // If not enough preferred, fill with next best
+    return [...preferred, ...nonDirectVideo.filter(f => !preferred.includes(f))].slice(0, count);
+  }
 }
