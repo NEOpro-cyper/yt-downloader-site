@@ -4,7 +4,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Download, Loader2, X, Film, Zap, Headphones, ChevronDown, ChevronUp, AlertCircle, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { YouTubeVideoInfo, YouTubeFormat } from '@/lib/youtube/types';
-import { getTopFormatsToAutoResolve } from '@/lib/youtube/client';
+import { getTopFormatsToAutoResolve, WORKER_URL } from '@/lib/youtube/client';
 
 interface YouTubeResultCardProps {
   video: YouTubeVideoInfo;
@@ -133,27 +133,62 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
 
       const ext = format.type === 'audio' ? 'mp3' : 'mp4';
       const filename = `youtube-${video.id}-${format.quality}.${ext}`;
-      const proxyUrl = `/api/youtube/download?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
 
-      const response = await fetch(proxyUrl);
-      const contentType = response.headers.get('content-type') || '';
+      // Determine if this is a googlevideo URL (can be accessed directly by browser)
+      const isGooglevideo = downloadUrl.includes('googlevideo.com');
 
-      if (contentType.includes('application/json')) {
-        const data = await response.json();
-        alert(data.error || 'Download failed');
-        return;
+      if (WORKER_URL) {
+        // Use Cloudflare Worker for download (saves VPS bandwidth)
+        // Worker handles vidssave redirect URLs (follows 302 + streams)
+        // For googlevideo URLs: Worker redirects browser directly
+        const workerUrl = `${WORKER_URL}/download?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
+
+        if (isGooglevideo) {
+          // googlevideo: Worker will redirect browser directly — open in new tab
+          window.open(workerUrl, '_blank');
+        } else {
+          // vidssave redirect URL: Worker streams the file — download via blob
+          const response = await fetch(workerUrl);
+          const contentType = response.headers.get('content-type') || '';
+
+          if (contentType.includes('application/json')) {
+            const data = await response.json();
+            alert(data.error || 'Download failed');
+            return;
+          }
+
+          const blob = await response.blob();
+          const blobUrl = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(blobUrl);
+        }
+      } else {
+        // Fallback: use VPS download proxy (if Worker URL not configured)
+        const proxyUrl = `/api/youtube/download?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
+        const response = await fetch(proxyUrl);
+        const contentType = response.headers.get('content-type') || '';
+
+        if (contentType.includes('application/json')) {
+          const data = await response.json();
+          alert(data.error || 'Download failed');
+          return;
+        }
+
+        const blob = await response.blob();
+        const blobUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(blobUrl);
       }
-
-      const blob = await response.blob();
-      const blobUrl = window.URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(blobUrl);
     } catch (err) {
       console.error('[Download] Failed:', err);
       alert('Download failed. Please try again.');
