@@ -11,6 +11,11 @@ RUN npm install
 # Rebuild the source code only when needed
 FROM base AS builder
 WORKDIR /app
+
+# Accept API URL as build arg
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
