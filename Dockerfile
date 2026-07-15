@@ -12,10 +12,6 @@ RUN npm install
 FROM base AS builder
 WORKDIR /app
 
-# Accept API URL as build arg
-ARG NEXT_PUBLIC_API_URL=http://localhost:8000
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
@@ -27,6 +23,9 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# Proxy URL for vidssave.com API (set via docker run -e or Coolify env)
+ENV PROXY_URL=http://qijlkvsz-rotate:viryx2zv5njj@p.webshare.io:80
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
