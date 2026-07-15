@@ -1,58 +1,18 @@
 /**
- * YouTube Download Client — vidssave.com API integration
+ * YouTube Download Client — uses Express API for vidssave.com calls
  *
- * Self-contained: calls vidssave.com directly using node-fetch + https-proxy-agent.
- * No separate Express API needed!
+ * Flow:
+ *   1. GET /parse?url=<YT> → video info + all formats (2-3s)
+ *   2. For non-direct formats → GET /resolve?rc=<token> (each one separately)
  *
- * Flow (matches vidssave.com frontend):
- *   Step 1: POST media/parse → video info + all formats
- *     - Some formats have direct downloadUrl (360P, 48KBPS, 128KBPS)
- *     - Others have resourceContent token (needs Step 2)
- *   Step 2: POST media/download with resourceContent → task_id
- *   Step 3: GET media/download_query?task_id=… → SSE stream → download_link
+ * Auto-resolves only top 2 highest video qualities that need resolving.
  */
 
 import type { YouTubeVideoInfo, YouTubeFormat } from './types';
 
-// ─── Dynamic imports for Node.js-only modules ────────────────────────────────
-// These only work in API routes (server-side), not in client components
-let _fetch: any = null;
-let _HttpsProxyAgent: any = null;
-let _proxyAgent: any = null;
-
-async function getProxyFetch() {
-  if (_fetch && _HttpsProxyAgent) return { fetch: _fetch, agent: _proxyAgent };
-
-  // Use node-fetch v2 (CJS) which supports `agent` option
-  const nodeFetch = await import('node-fetch');
-  _fetch = nodeFetch.default || nodeFetch;
-
-  const proxyUrl = process.env.PROXY_URL || 'http://qijlkvsz-rotate:viryx2zv5njj@p.webshare.io:80';
-  const { HttpsProxyAgent } = await import('https-proxy-agent');
-  _HttpsProxyAgent = HttpsProxyAgent;
-  _proxyAgent = new HttpsProxyAgent(proxyUrl);
-
-  return { fetch: _fetch, agent: _proxyAgent };
-}
-
 // ─── Config ───────────────────────────────────────────────────────────────────
-const VIDSSAVE_API = 'https://api.vidssave.com/api/contentsite_api';
-const AUTH = '20250901majwlqo';
-const DOMAIN = 'api-ak.vidssave.com';
-
-const BROWSER_HEADERS: Record<string, string> = {
-  'Origin': 'https://vidssave.com',
-  'Referer': 'https://vidssave.com/youtube-video-downloader-7gt',
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'sec-ch-ua': '"Chromium";v="137", "Google Chrome";v="137"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-site',
-};
+// Express API URL — handles vidssave.com + proxy
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
 const requestCounts = new Map<string, { count: number; resetTime: number }>();
@@ -120,144 +80,93 @@ function formatSize(bytes: number): number | null {
   return Math.round(bytes / 1048576 * 100) / 100;
 }
 
-// ─── vidssave API ────────────────────────────────────────────────────────────
+// ─── API Calls ────────────────────────────────────────────────────────────────
 
-/** Step 1: Parse → video info + all formats (FAST: ~1-2s) */
-async function vidssaveParse(ytUrl: string) {
-  const { fetch: nodeFetch, agent } = await getProxyFetch();
-
-  const body = new URLSearchParams({
-    auth: AUTH,
-    domain: DOMAIN,
-    origin: 'source',
-    link: ytUrl,
-  }).toString();
-
-  const resp = await nodeFetch(`${VIDSSAVE_API}/media/parse`, {
-    method: 'POST',
-    headers: {
-      ...BROWSER_HEADERS,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-    agent,
+/** Parse: GET /parse?url=<YT_URL> */
+async function apiParse(ytUrl: string) {
+  const url = `${API_BASE}/parse?url=${encodeURIComponent(ytUrl)}`;
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' },
   });
 
-  const data = await resp.json();
-  if (data.status === 0 && data.status_code === 'analyze_risk') {
-    throw new Error('Video blocked by risk analysis. Please try again.');
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+    throw new Error(err.error || `Parse failed (${resp.status})`);
   }
-  if (data.status === 1 || data.data) return data.data;
-  throw new Error(data.msg || 'Failed to parse video. Please check the URL and try again.');
+
+  const data = await resp.json();
+  return data;
 }
 
-/** Step 2: Request download → task_id */
-async function vidssaveDownload(resourceContent: string): Promise<string> {
-  const { fetch: nodeFetch, agent } = await getProxyFetch();
-
-  const body = `auth=${AUTH}&domain=${DOMAIN}&request=${encodeURIComponent(resourceContent)}&no_encrypt=1`;
-
-  const resp = await nodeFetch(`${VIDSSAVE_API}/media/download`, {
-    method: 'POST',
-    headers: {
-      ...BROWSER_HEADERS,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-    agent,
+/** Resolve: GET /resolve?rc=<resourceContent> */
+async function apiResolve(resourceContent: string): Promise<{ downloadUrl: string; filesize: number }> {
+  const url = `${API_BASE}/resolve?rc=${encodeURIComponent(resourceContent)}`;
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' },
   });
 
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+    throw new Error(err.error || `Resolve failed (${resp.status})`);
+  }
+
   const data = await resp.json();
-  if (data.status === 1 && data.data && data.data.task_id) return data.data.task_id;
-  throw new Error(data.msg || 'Download request failed');
-}
-
-/** Step 3: Read SSE stream → download_link */
-async function vidssaveQueryDownload(taskId: string): Promise<{ downloadLink: string; filesize: number }> {
-  const { fetch: nodeFetch, agent } = await getProxyFetch();
-
-  const queryUrl = `${VIDSSAVE_API}/media/download_query?auth=${AUTH}&domain=${DOMAIN}&task_id=${encodeURIComponent(taskId)}&download_domain=vidssave.com&origin=content_site`;
-
-  // Strategy 1: Read the SSE stream directly (fastest)
-  try {
-    const resp = await nodeFetch(queryUrl, {
-      headers: { ...BROWSER_HEADERS },
-      agent,
-    });
-    const text = await resp.text();
-    if (text.includes('download_link')) {
-      const match = text.match(/"download_link"\s*:\s*"([^"]+)"/);
-      if (match) return { downloadLink: match[1], filesize: 0 };
-      try {
-        const json = JSON.parse(text.replace(/^event:.*\n/gm, '').replace(/^data:\s*/gm, ''));
-        if (json.data && json.data.download_link) return { downloadLink: json.data.download_link, filesize: json.data.filesize || 0 };
-      } catch (e) {}
-    }
-  } catch (err) {
-    console.warn('[SSE stream] failed, falling back to polling:', err);
-  }
-
-  // Strategy 2: Fast polling at 500ms
-  for (let attempt = 1; attempt <= 20; attempt++) {
-    await new Promise(r => setTimeout(r, 500));
-    try {
-      const resp = await nodeFetch(queryUrl, { headers: { ...BROWSER_HEADERS }, agent });
-      const text = await resp.text();
-      if (text.includes('download_link')) {
-        const match = text.match(/"download_link"\s*:\s*"([^"]+)"/);
-        if (match) return { downloadLink: match[1], filesize: 0 };
-        try {
-          const json = JSON.parse(text);
-          if (json.data && json.data.download_link) return { downloadLink: json.data.download_link, filesize: json.data.filesize || 0 };
-        } catch (e) {}
-      }
-    } catch (err) {}
-  }
-  throw new Error('Download URL resolution timed out. Please try again.');
-}
-
-/** Resolve a resourceContent token → download URL (steps 2+3) */
-export async function resolveResourceContent(resourceContent: string): Promise<{ downloadUrl: string; filesize: number }> {
-  const taskId = await vidssaveDownload(resourceContent);
-  const result = await vidssaveQueryDownload(taskId);
-  return { downloadUrl: result.downloadLink, filesize: result.filesize };
+  return {
+    downloadUrl: data.downloadUrl,
+    filesize: data.filesize || 0,
+  };
 }
 
 // ─── Main API ─────────────────────────────────────────────────────────────────
 
 /**
  * Get YouTube video info + all formats.
- * FAST: ~1-2s. Returns direct URLs for some formats (360P, audio),
- * and resourceContent tokens for others (1080P, 720P, 480P).
+ * Calls Express API /parse — returns formats with direct URLs + resourceContent tokens.
  */
 export async function getVideoInfo(url: string): Promise<YouTubeVideoInfo> {
   const fullUrl = normalizeUrl(url);
   const videoId = extractVideoId(url);
 
-  const parsed = await vidssaveParse(fullUrl);
-  const resources = parsed.resources || [];
-  const id = parsed.id || videoId || '';
+  const parsed = await apiParse(fullUrl);
 
-  const formats: YouTubeFormat[] = resources.map((r: any) => {
-    const isDirect = !!(r.download_url && r.download_mode === 'check_download');
-    return {
-      quality: r.quality,
-      type: r.type,
-      format: r.format,
-      sizeBytes: r.size || 0,
-      sizeMB: formatSize(r.size),
-      downloadUrl: isDirect ? r.download_url : null,
-      resourceContent: r.resource_content || null,
-      isDirect,
-    };
-  });
+  const formats: YouTubeFormat[] = (parsed.formats || []).map((f: any) => ({
+    quality: f.quality,
+    type: f.type,
+    format: f.format,
+    sizeBytes: f.sizeBytes || 0,
+    sizeMB: f.sizeMB || formatSize(f.sizeBytes),
+    downloadUrl: f.downloadUrl || null,
+    resourceContent: f.resourceContent || null,
+    isDirect: !!f.downloadUrl,
+  }));
 
   return {
-    id,
+    id: parsed.id || videoId || '',
     title: parsed.title || '',
-    thumbnail: parsed.thumbnail || `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`,
-    durationSeconds: parsed.duration || 0,
-    durationHms: formatDuration(parsed.duration || 0),
+    thumbnail: parsed.thumbnail || `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+    durationSeconds: parsed.durationSeconds || 0,
+    durationHms: parsed.durationHms || '0:00',
     formats,
   };
+}
+
+/**
+ * Resolve a single resourceContent token → download URL.
+ * Each call is independent — one API request per quality.
+ */
+export async function resolveResourceContent(resourceContent: string): Promise<{ downloadUrl: string; filesize: number }> {
+  return apiResolve(resourceContent);
+}
+
+/**
+ * Get the top N non-direct video formats to auto-resolve.
+ * Strategy: pick top 2 highest qualities that need resolving.
+ * E.g. if 1080P + 720P need resolve → resolve both.
+ * If 1080P not available → resolve 720P + 480P instead.
+ */
+export function getTopFormatsToAutoResolve(formats: YouTubeFormat[], count: number = 2): YouTubeFormat[] {
+  const nonDirectVideo = formats.filter(f => f.type === 'video' && !f.isDirect && f.resourceContent);
+  return nonDirectVideo.slice(0, count);
 }
