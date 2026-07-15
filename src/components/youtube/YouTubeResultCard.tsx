@@ -29,11 +29,13 @@ function getQualityIcon(quality: string) {
 }
 
 export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
-  // Track resolved URLs: resourceContent → downloadUrl
+  // Track resolved URLs: quality → downloadUrl
   const [resolvedUrls, setResolvedUrls] = useState<Map<string, string>>(new Map());
-  // Track which are currently resolving
+  // Track audio URLs: quality → audioUrl
+  const [resolvedAudioUrls, setResolvedAudioUrls] = useState<Map<string, string>>(new Map());
+  // Track which are currently resolving (by quality)
   const [resolving, setResolving] = useState<Set<string>>(new Set());
-  // Track errors: resourceContent → error message
+  // Track errors: quality → error message
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
   const [downloadingUrl, setDownloadingUrl] = useState<string | null>(null);
   const [showAllQualities, setShowAllQualities] = useState(false);
@@ -48,39 +50,44 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
   const moreVideoFormats = videoFormats.slice(3);
   const visibleVideoFormats = showAllQualities ? videoFormats : topVideoFormats;
 
-  /** Resolve a single format — one API call */
+  /** Resolve a single quality — one API call per quality */
   const resolveFormat = useCallback(async (format: YouTubeFormat) => {
+    // Already has direct URL from parse
     if (format.downloadUrl) return format.downloadUrl;
-    if (!format.resourceContent) return null;
-    if (resolvedUrls.has(format.resourceContent)) return resolvedUrls.get(format.resourceContent)!;
+    // Already resolved?
+    if (resolvedUrls.has(format.quality)) return resolvedUrls.get(format.quality)!;
 
-    const rc = format.resourceContent;
-    setResolving(prev => new Set(prev).add(rc));
-    setErrors(prev => { const m = new Map(prev); m.delete(rc); return m; });
+    const q = format.quality;
+    setResolving(prev => new Set(prev).add(q));
+    setErrors(prev => { const m = new Map(prev); m.delete(q); return m; });
 
     try {
       const response = await fetch('/api/youtube/resolve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ resourceContent: rc }),
+        body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${video.id}`, quality: q }),
       });
 
       const data = await response.json();
       if (data.success && data.data?.downloadUrl) {
-        setResolvedUrls(prev => new Map(prev).set(rc, data.data.downloadUrl));
+        setResolvedUrls(prev => new Map(prev).set(q, data.data.downloadUrl));
+        // Store audio URL if provided (for merge tip)
+        if (data.data.audioUrl) {
+          setResolvedAudioUrls(prev => new Map(prev).set(q, data.data.audioUrl));
+        }
         return data.data.downloadUrl;
       }
       const errMsg = data.error || 'Resolve failed';
-      setErrors(prev => new Map(prev).set(rc, errMsg));
+      setErrors(prev => new Map(prev).set(q, errMsg));
       return null;
     } catch (err: any) {
       const errMsg = err.message || 'Network error';
-      setErrors(prev => new Map(prev).set(rc, errMsg));
+      setErrors(prev => new Map(prev).set(q, errMsg));
       return null;
     } finally {
-      setResolving(prev => { const s = new Set(prev); s.delete(rc); return s; });
+      setResolving(prev => { const s = new Set(prev); s.delete(q); return s; });
     }
-  }, [resolvedUrls]);
+  }, [resolvedUrls, video.id]);
 
   /** Auto-resolve top 2 non-direct video formats on mount */
   useEffect(() => {
@@ -107,12 +114,12 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
     try {
       let downloadUrl: string | null = null;
 
-      // Already resolved?
+      // Already has direct URL from parse?
       if (format.downloadUrl) {
         downloadUrl = format.downloadUrl;
-      } else if (format.resourceContent && resolvedUrls.has(format.resourceContent)) {
-        downloadUrl = resolvedUrls.get(format.resourceContent)!;
-      } else if (format.resourceContent) {
+      } else if (resolvedUrls.has(format.quality)) {
+        downloadUrl = resolvedUrls.get(format.quality)!;
+      } else {
         // Not resolved yet — resolve now
         downloadUrl = await resolveFormat(format);
       }
@@ -158,15 +165,14 @@ export function YouTubeResultCard({ video, onReset }: YouTubeResultCardProps) {
   /** Get effective download URL for a format */
   const getUrl = useCallback((f: YouTubeFormat): string | null => {
     if (f.downloadUrl) return f.downloadUrl;
-    if (f.resourceContent) return resolvedUrls.get(f.resourceContent) || null;
-    return null;
+    return resolvedUrls.get(f.quality) || null;
   }, [resolvedUrls]);
 
   /** Format row — reused for video and audio */
   const FormatRow = ({ f, idx, variant }: { f: YouTubeFormat; idx: number; variant: 'video' | 'audio' }) => {
     const url = getUrl(f);
-    const isResolving = !!f.resourceContent && resolving.has(f.resourceContent);
-    const error = f.resourceContent ? errors.get(f.resourceContent) : null;
+    const isResolving = !f.isDirect && resolving.has(f.quality);
+    const error = !f.isDirect ? errors.get(f.quality) : null;
     const isDownloading = downloadingUrl === url;
     const isLoading = isResolving || isDownloading;
     const isAudio = variant === 'audio';
